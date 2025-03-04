@@ -176,7 +176,7 @@ class WanSelfAttention(nn.Module):
                 k=k,
                 v=v,
                 window_size=self.window_size_3d,
-                latent_size=tuple(grid_size)
+                latent_size=tuple(max_grid_size)
             )
         else:
             raise NotImplementedError("Unknown attn algo")
