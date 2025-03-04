@@ -229,7 +229,7 @@ def _untile(x: torch.Tensor, img_size: Tuple[int, int, int], tile_size: Tuple[in
     return x
 
 DEFAULT_TILE_SIZE = (6, 8, 8)
-DEBUG = True
+DEBUG = False
 
 def sliding_tile_attention(
     q: torch.Tensor,

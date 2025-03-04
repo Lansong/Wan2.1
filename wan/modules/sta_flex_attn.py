@@ -3,6 +3,7 @@
 from typing import Tuple
 
 import torch
+from functools import cache
 from torch import BoolTensor, IntTensor
 from torch.nn.attention.flex_attention import create_block_mask
 
@@ -58,8 +59,8 @@ def generate_sta_mask(canvas_twh, kernel_twh, tile_twh, text_length):
     sta_mask_3d.__name__ = f"natten_3d_c{canvas_t}x{canvas_w}x{canvas_h}_k{kernel_t}x{kernel_w}x{kernel_h}"
     return sta_mask_3d
 
-
-def get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, text_length, device, text_max_len=256):
+@cache
+def _get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, text_length, device, text_max_len):
     img_seq_len = img_size[0] * img_size[1] * img_size[2]
     image_mask = generate_sta_mask(img_size, kernel_size, tile_size, text_length)
     mask = create_block_mask(image_mask,
@@ -70,3 +71,7 @@ def get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, text_lengt
                              device=device,
                              _compile=True)
     return mask
+
+
+def get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, text_length, device, text_max_len=256):
+    return _get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, text_length, str(device), text_max_len)
