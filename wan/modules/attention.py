@@ -229,7 +229,7 @@ def _untile(x: torch.Tensor, img_size: Tuple[int, int, int], tile_size: Tuple[in
     return x
 
 DEFAULT_TILE_SIZE = (6, 8, 8)
-DEBUG = False
+DEBUG = True
 
 def sliding_tile_attention(
     q: torch.Tensor,
@@ -252,7 +252,7 @@ def sliding_tile_attention(
         from st_attn import sliding_tile_attention
     except ImportError as e:
         TK_IMPL_AVAILABLE = False
-        print("Could not load cuda Sliding Tile Attention, using Flex Attention instread")
+        print("Could not load cuda Sliding Tile Attention, using Flex Attention instead")
         from .sta_flex_attn import get_sliding_tile_attention_mask
         from torch.nn.attention.flex_attention import flex_attention
 
