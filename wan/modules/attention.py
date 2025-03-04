@@ -192,7 +192,7 @@ def _tile(x: torch.Tensor, latent_size: Tuple[int, int, int], tile_size: Tuple[i
     """
     for L, l in zip(latent_size, tile_size):
         if L % l != 0:
-            raise ValueError(f"Tile size must divide video latent, found {L=} {l=}")
+            raise ValueError(f"Tile size must divide video latent, found {L=} {l=}, {latent_size=}, try adjusing frame number, resolution or tile_size")
 
     img_f, img_h, img_w = latent_size
     tile_f, tile_h, tile_w = tile_size
@@ -251,12 +251,12 @@ def sliding_tile_attention(
     try:
         from st_attn import sliding_tile_attention
     except ImportError as e:
+        TK_IMPL_AVAILABLE = False
         print("Could not load cuda Sliding Tile Attention, using Flex Attention instread")
         from .sta_flex_attn import get_sliding_tile_attention_mask
         from torch.nn.attention.flex_attention import flex_attention
-        TK_IMPL_AVAILABLE = False
 
-    b, seqlen, head_num, head_dim = q.shape
+    _, _, head_num, _ = q.shape
     # tile inputs
     q = _tile(x=q, latent_size=latent_size, tile_size=tile_size)
     k = _tile(x=k, latent_size=latent_size, tile_size=tile_size)
