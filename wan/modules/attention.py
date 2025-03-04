@@ -228,8 +228,18 @@ def _untile(x: torch.Tensor, img_size: Tuple[int, int, int], tile_size: Tuple[in
     )
     return x
 
-DEFAULT_TILE_SIZE = (6, 8, 8)
+DEFAULT_TILE_SIZE = (3, 5, 4)
 DEBUG = False
+TK_IMPL_AVAILABLE = True
+try:
+    from st_attn import sliding_tile_attention
+except ImportError as e:
+    TK_IMPL_AVAILABLE = False
+    print("Could not load cuda Sliding Tile Attention, using Flex Attention instead")
+    from .sta_flex_attn import get_sliding_tile_attention_mask
+    from torch.nn.attention.flex_attention import flex_attention
+    torch._dynamo.config.cache_size_limit = 1000
+    flex_attention = torch.compile(flex_attention, dynamic=False)
 
 def sliding_tile_attention(
     q: torch.Tensor,
@@ -247,15 +257,7 @@ def sliding_tile_attention(
         window_size:    STA window size, each tile is (6, 8, 8) as stated in wan/csrc/sliding_tile_attention/README.md
         img_size:       [frame, height, width]
     """
-    TK_IMPL_AVAILABLE = True
-    try:
-        from st_attn import sliding_tile_attention
-    except ImportError as e:
-        TK_IMPL_AVAILABLE = False
-        print("Could not load cuda Sliding Tile Attention, using Flex Attention instead")
-        from .sta_flex_attn import get_sliding_tile_attention_mask
-        from torch.nn.attention.flex_attention import flex_attention
-
+    ori_dtype = q.dtype
     # TODO @botbw: better way of doing this
     q = q.to(torch.bfloat16)
     k = k.to(torch.bfloat16)
@@ -302,4 +304,4 @@ def sliding_tile_attention(
             block_mask=block_mod
         )
 
-    return _untile(x=o, img_size=latent_size, tile_size=tile_size)
+    return _untile(x=o, img_size=latent_size, tile_size=tile_size).to(ori_dtype)

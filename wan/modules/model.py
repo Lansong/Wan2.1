@@ -117,8 +117,8 @@ class WanSelfAttention(nn.Module):
             window_size_3d: sliding window size for non-flash-attn
         """
         assert dim % num_heads == 0
-        assert algo in ['flash_attn', 'sliding_window_attn']
-        if algo in ['sliding_window_attn']:
+        assert algo in ['flash_attn', 'sliding_tile_attn']
+        if algo in ['sliding_tile_attn']:
             assert window_size_3d is not None
 
         super().__init__()
@@ -165,7 +165,7 @@ class WanSelfAttention(nn.Module):
                 v=v,
                 k_lens=seq_lens,
                 window_size=self.window_size)
-        elif self.algo == 'sliding_window_attn':
+        elif self.algo == 'sliding_tile_attn':
             max_grid_size = list(grid_sizes[0].tolist())
             for grid_size in grid_sizes[1:]:
                 grid_size = tuple(grid_size.tolist())
@@ -422,7 +422,7 @@ class WanModel(ModelMixin, ConfigMixin):
                  qk_norm=True,
                  cross_attn_norm=True,
                  eps=1e-6,
-                 algo: str="sliding_window_attn",
+                 algo: str="sliding_tile_attn",
                  window_size_3d: Optional[Tuple[int, int ,int]]=[3, 3, 3],
                  ):
         r"""
