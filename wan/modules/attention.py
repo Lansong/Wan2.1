@@ -1,6 +1,9 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
 
+from einops import rearrange
+from typing import Tuple
+
 try:
     import flash_attn_interface
     FLASH_ATTN_3_AVAILABLE = True
@@ -177,3 +180,121 @@ def attention(
 
         out = out.transpose(1, 2).contiguous()
         return out
+
+__OPERAND_1 = "b (n_f t_f n_h t_h n_w t_w) n_head head_dim"
+__OPERAND_2 = "b n_head (n_f n_h n_w t_f t_h t_w) head_dim"
+
+def _tile(x: torch.Tensor, latent_size: Tuple[int, int, int], tile_size: Tuple[int, int, int]) -> torch.Tensor:
+    """
+        Flatten strategy for Wan
+        Reference:
+            https://github.com/hao-ai-lab/FastVideo/blob/554ee17de54b95432edd4465a65e75d809b4564f/fastvideo/models/hunyuan/modules/attenion.py#L37
+    """
+    for L, l in zip(latent_size, tile_size):
+        if L % l != 0:
+            raise ValueError(f"Tile size must divide video latent, found {L=} {l=}")
+
+    img_f, img_h, img_w = latent_size
+    tile_f, tile_h, tile_w = tile_size
+    x = rearrange(
+        x,
+        __OPERAND_1 + " -> " + __OPERAND_2,
+        n_f=img_f // tile_f,
+        n_h=img_h // tile_h,
+        n_w=img_w // tile_w,
+        t_f=tile_f,
+        t_h=tile_h,
+        t_w=tile_w
+    )
+    return x
+
+
+def _untile(x: torch.Tensor, img_size: Tuple[int, int, int], tile_size: Tuple[int, int, int]) -> torch.Tensor:
+    for L, l in zip(img_size, tile_size):
+        if L % l != 0:
+            raise ValueError("Tile size must divide video latent")
+
+    img_f, img_h, img_w = img_size
+    tile_f, tile_h, tile_w = tile_size
+    x = rearrange(
+        x,
+        __OPERAND_2 + " -> " + __OPERAND_1,
+        n_f=img_f // tile_f,
+        n_h=img_h // tile_h,
+        n_w=img_w // tile_w,
+        t_f=tile_f,
+        t_h=tile_h,
+        t_w=tile_w
+    )
+    return x
+
+DEFAULT_TILE_SIZE = (6, 8, 8)
+DEBUG = False
+
+def sliding_tile_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    window_size: Tuple[int, int, int],
+    latent_size: Tuple[int, int, int],
+    tile_size: Tuple[int, int, int] = DEFAULT_TILE_SIZE
+):
+    """
+    Args:
+        q:              [B, Lq, Nq, C1]. batch, seqlen, head_num, head_dim
+        k:              [B, Lk, Nk, C1].
+        v:              [B, Lk, Nk, C2]. Nq must be divisible by Nk.
+        window_size:    STA window size, each tile is (6, 8, 8) as stated in wan/csrc/sliding_tile_attention/README.md
+        img_size:       [frame, height, width]
+    """
+    TK_IMPL_AVAILABLE = True
+    try:
+        from st_attn import sliding_tile_attention
+    except ImportError as e:
+        print("Could not load cuda Sliding Tile Attention, using Flex Attention instread")
+        from .sta_flex_attn import get_sliding_tile_attention_mask
+        from torch.nn.attention.flex_attention import flex_attention
+        TK_IMPL_AVAILABLE = False
+
+    b, seqlen, head_num, head_dim = q.shape
+    # tile inputs
+    q = _tile(x=q, latent_size=latent_size, tile_size=tile_size)
+    k = _tile(x=k, latent_size=latent_size, tile_size=tile_size)
+    v = _tile(x=v, latent_size=latent_size, tile_size=tile_size)
+
+    if TK_IMPL_AVAILABLE:
+        assert tile_size == DEFAULT_TILE_SIZE, "TK impl only supports default tile size"
+        o = sliding_tile_attention(
+            q_all=q,
+            k_all=k,
+            v_all=v,
+            window_size=[window_size] * head_num,  # TODO @botbw: support different window for different attn head and searching strategy
+            text_length=0,
+            has_text=False
+        )
+    else:
+        block_mod = get_sliding_tile_attention_mask(
+            kernel_size=window_size,
+            tile_size=tile_size,
+            img_size=latent_size,
+            text_length=0,
+            device=q.device,
+            text_max_len=0
+        )
+        if DEBUG:
+            from attn_gym import visualize_attention_scores
+            # install from https://github.com/pytorch-labs/attention-gym/tree/main
+            visualize_attention_scores(
+                query=q,
+                key=k,
+                mask_mod=block_mod.mask_mod,
+                name='flex-attn-visual'
+            )
+        o = flex_attention(
+            query=q,
+            key=k,
+            value=v,
+            block_mask=block_mod
+        )
+
+    return _untile(x=o, img_size=latent_size, tile_size=tile_size)

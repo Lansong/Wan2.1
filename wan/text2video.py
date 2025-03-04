@@ -154,8 +154,8 @@ class WanT2V:
         # preprocess
         F = frame_num
         target_shape = (self.vae.model.z_dim, (F - 1) // self.vae_stride[0] + 1,
-                        size[1] // self.vae_stride[1],
-                        size[0] // self.vae_stride[2])
+                        size[1] // self.vae_stride[1],  # height: default 720
+                        size[0] // self.vae_stride[2])  # width default 1280
 
         seq_len = math.ceil((target_shape[2] * target_shape[3]) /
                             (self.patch_size[1] * self.patch_size[2]) *
@@ -181,10 +181,10 @@ class WanT2V:
 
         noise = [
             torch.randn(
-                target_shape[0],
-                target_shape[1],
-                target_shape[2],
-                target_shape[3],
+                target_shape[0],  # vae z_dim
+                target_shape[1],  # frame
+                target_shape[2],  # height
+                target_shape[3],  # width
                 dtype=torch.float32,
                 device=self.device,
                 generator=seed_g)

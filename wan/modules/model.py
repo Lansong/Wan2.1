@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
+from typing import Tuple, Optional
 
 import torch
 import torch.cuda.amp as amp
@@ -7,7 +8,7 @@ import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
-from .attention import flash_attention
+from .attention import flash_attention, sliding_tile_attention
 
 __all__ = ['WanModel']
 
@@ -104,10 +105,22 @@ class WanSelfAttention(nn.Module):
     def __init__(self,
                  dim,
                  num_heads,
+                 algo: str,
+                 window_size_3d: Optional[Tuple[int, int ,int]],
                  window_size=(-1, -1),
                  qk_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 ):
+        """
+        Args:
+            algo: algo name
+            window_size_3d: sliding window size for non-flash-attn
+        """
         assert dim % num_heads == 0
+        assert algo in ['flash_attn', 'sliding_window_attn']
+        if algo in ['sliding_window_attn']:
+            assert window_size_3d is not None
+
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -115,6 +128,8 @@ class WanSelfAttention(nn.Module):
         self.window_size = window_size
         self.qk_norm = qk_norm
         self.eps = eps
+        self.algo = algo
+        self.window_size_3d = window_size_3d
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -133,7 +148,6 @@ class WanSelfAttention(nn.Module):
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-
         # query, key, value function
         def qkv_fn(x):
             q = self.norm_q(self.q(x)).view(b, s, n, d)
@@ -142,14 +156,30 @@ class WanSelfAttention(nn.Module):
             return q, k, v
 
         q, k, v = qkv_fn(x)
+        q, v = rope_apply(q, grid_sizes, freqs), rope_apply(k, grid_sizes, freqs)
 
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
-            v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size)
-
+        if self.algo == 'flash_attn':
+            x = flash_attention(
+                q=q,
+                k=k,
+                v=v,
+                k_lens=seq_lens,
+                window_size=self.window_size)
+        elif self.algo == 'sliding_window_attn':
+            max_grid_size = list(grid_sizes[0].tolist())
+            for grid_size in grid_sizes[1:]:
+                grid_size = tuple(grid_size.tolist())
+                for i in len(max_grid_size):
+                    max_grid_size[i] = max(max_grid_size[i], grid_size[i])
+            x = sliding_tile_attention(
+                q=q,
+                k=k,
+                v=v,
+                window_size=self.window_size_3d,
+                latent_size=tuple(grid_size)
+            )
+        else:
+            raise NotImplementedError("Unknown attn algo")
         # output
         x = x.flatten(2)
         x = self.o(x)
@@ -186,10 +216,12 @@ class WanI2VCrossAttention(WanSelfAttention):
     def __init__(self,
                  dim,
                  num_heads,
+                 algo: str,
+                 window_size_3d: Optional[Tuple[int, int ,int]],
                  window_size=(-1, -1),
                  qk_norm=True,
                  eps=1e-6):
-        super().__init__(dim, num_heads, window_size, qk_norm, eps)
+        super().__init__(dim, num_heads, algo, window_size_3d, window_size, qk_norm, eps, algo, window_size_3d)
 
         self.k_img = nn.Linear(dim, dim)
         self.v_img = nn.Linear(dim, dim)
@@ -238,10 +270,13 @@ class WanAttentionBlock(nn.Module):
                  dim,
                  ffn_dim,
                  num_heads,
+                 algo: str,
+                 window_size_3d: Optional[Tuple[int, int ,int]],
                  window_size=(-1, -1),
                  qk_norm=True,
                  cross_attn_norm=False,
-                 eps=1e-6):
+                 eps=1e-6
+                 ):
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -253,8 +288,8 @@ class WanAttentionBlock(nn.Module):
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
-                                          eps)
+        self.self_attn = WanSelfAttention(dim, num_heads, algo, window_size_3d, window_size, qk_norm,
+                                          eps, algo, window_size_3d)
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
@@ -262,7 +297,7 @@ class WanAttentionBlock(nn.Module):
                                                                       num_heads,
                                                                       (-1, -1),
                                                                       qk_norm,
-                                                                      eps)
+                                                                      eps, algo, window_size_3d)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
@@ -384,7 +419,10 @@ class WanModel(ModelMixin, ConfigMixin):
                  window_size=(-1, -1),
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 algo: str="sliding_window_attn",
+                 window_size_3d: Optional[Tuple[int, int ,int]]=[3, 3, 3],
+                 ):
         r"""
         Initialize the diffusion model backbone.
 
@@ -455,7 +493,7 @@ class WanModel(ModelMixin, ConfigMixin):
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
-            WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
+            WanAttentionBlock(cross_attn_type, dim, ffn_dim, algo, window_size_3d, num_heads,
                               window_size, qk_norm, cross_attn_norm, eps)
             for _ in range(num_layers)
         ])
@@ -493,7 +531,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         Args:
             x (List[Tensor]):
-                List of input video tensors, each with shape [C_in, F, H, W]
+                List of input video tensors, each with shape [C_in, F, H, W] [vae_dim, frame, height, width]
             t (Tensor):
                 Diffusion timesteps tensor of shape [B]
             context (List[Tensor]):
@@ -520,16 +558,16 @@ class WanModel(ModelMixin, ConfigMixin):
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]  # list([1, vae_dim, frame, height, width])
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
-        x = [u.flatten(2).transpose(1, 2) for u in x]
+        x = [u.flatten(2).transpose(1, 2) for u in x]  # list([1, vae_dim, frame, height, width]) -> [1， frame * height * width, vae_dim]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len
         x = torch.cat([
             torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
                       dim=1) for u in x
-        ])
+        ]) # list([1， frame * height * width, vae_dim]) -> [1，frame * height * width, vae_dim]
 
         # time embeddings
         with amp.autocast(dtype=torch.float32):
