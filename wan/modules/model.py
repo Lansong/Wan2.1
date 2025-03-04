@@ -493,7 +493,7 @@ class WanModel(ModelMixin, ConfigMixin):
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
-            WanAttentionBlock(cross_attn_type, dim, ffn_dim, algo, window_size_3d, num_heads,
+            WanAttentionBlock(cross_attn_type, dim, ffn_dim,num_heads, algo, window_size_3d,
                               window_size, qk_norm, cross_attn_norm, eps)
             for _ in range(num_layers)
         ])
