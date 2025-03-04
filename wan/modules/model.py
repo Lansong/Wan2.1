@@ -295,9 +295,11 @@ class WanAttentionBlock(nn.Module):
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
         self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](dim,
                                                                       num_heads,
+                                                                      'flash_attn',
+                                                                      None,
                                                                       (-1, -1),
                                                                       qk_norm,
-                                                                      eps, algo, window_size_3d)
+                                                                      eps)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
