@@ -256,6 +256,11 @@ def sliding_tile_attention(
         from .sta_flex_attn import get_sliding_tile_attention_mask
         from torch.nn.attention.flex_attention import flex_attention
 
+    # TODO @botbw: better way of doing this
+    q = q.to(torch.bfloat16)
+    k = k.to(torch.bfloat16)
+    v = v.to(torch.bfloat16)
+
     _, _, head_num, _ = q.shape
     # tile inputs
     q = _tile(x=q, latent_size=latent_size, tile_size=tile_size)
