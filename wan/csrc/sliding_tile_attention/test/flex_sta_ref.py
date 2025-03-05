@@ -1,3 +1,5 @@
+# Note: This file is just an archieve and shouldn't be used outside csrc folder
+# The implementation in Wan can be found here: wan/modules/sta_flex_attn.py
 from typing import Tuple
 
 import torch

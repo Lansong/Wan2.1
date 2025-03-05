@@ -1,4 +1,6 @@
-# a copy from wan/csrc/sliding_tile_attention/test/flex_sta_ref.py
+# Modified from wan/csrc/sliding_tile_attention/test/flex_sta_ref.py
+# The original module was in csrc folder and shldn't be referred from python code
+# Thus we maintained flex attn implementation here
 
 from typing import Tuple
 
@@ -7,10 +9,10 @@ from functools import cache
 from torch import BoolTensor, IntTensor
 from torch.nn.attention.flex_attention import create_block_mask
 
-# Peiyuan: This is neccesay. Dont know why. see https://github.com/pytorch/pytorch/issues/135028
 torch._inductor.config.realize_opcount_threshold = 100
+torch._dynamo.config.cache_size_limit = 1000
 
-def generate_sta_mask(canvas_twh, kernel_twh, tile_twh, text_length):
+def generate_sta_mask(canvas_twh, kernel_twh, tile_twh):
     """Generates a 3D NATTEN attention mask with a given kernel size.
     
     Args:
@@ -52,26 +54,24 @@ def generate_sta_mask(canvas_twh, kernel_twh, tile_twh, text_length):
         hori_mask = (kernel_center_x - kv_x_tile).abs() <= kernel_h // 2
         vert_mask = (kernel_center_y - kv_y_tile).abs() <= kernel_w // 2
         image_mask = (q_idx < img_seq_len) & (kv_idx < img_seq_len)
-        image_to_text_mask = (q_idx < img_seq_len) & (kv_idx >= img_seq_len) & (kv_idx < img_seq_len + text_length)
-        text_to_all_mask = (q_idx >= img_seq_len) & (kv_idx < img_seq_len + text_length)
-        return (image_mask & time_mask & hori_mask & vert_mask) | image_to_text_mask | text_to_all_mask
+        return image_mask & time_mask & hori_mask & vert_mask
 
     sta_mask_3d.__name__ = f"natten_3d_c{canvas_t}x{canvas_w}x{canvas_h}_k{kernel_t}x{kernel_w}x{kernel_h}"
     return sta_mask_3d
 
 @cache
-def _get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, text_length, device, text_max_len):
+def _get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, device):
     img_seq_len = img_size[0] * img_size[1] * img_size[2]
-    image_mask = generate_sta_mask(img_size, kernel_size, tile_size, text_length)
+    image_mask = generate_sta_mask(img_size, kernel_size, tile_size)
     mask = create_block_mask(image_mask,
                              B=None,
                              H=None,
-                             Q_LEN=img_seq_len + text_max_len,
-                             KV_LEN=img_seq_len + text_max_len,
+                             Q_LEN=img_seq_len,
+                             KV_LEN=img_seq_len,
                              device=device,
                              _compile=True)
     return mask
 
 
-def get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, text_length, device, text_max_len=256):
-    return _get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, text_length, str(device), text_max_len)
+def get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, device):
+    return _get_sliding_tile_attention_mask(kernel_size, tile_size, img_size, str(device))

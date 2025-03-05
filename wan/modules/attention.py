@@ -238,7 +238,6 @@ except ImportError as e:
     print("Could not load cuda Sliding Tile Attention, using Flex Attention instead")
     from .sta_flex_attn import get_sliding_tile_attention_mask
     from torch.nn.attention.flex_attention import flex_attention
-    torch._dynamo.config.cache_size_limit = 1000
     flex_attention = torch.compile(flex_attention, dynamic=False)
 
 def sliding_tile_attention(
@@ -284,9 +283,7 @@ def sliding_tile_attention(
             kernel_size=window_size,
             tile_size=tile_size,
             img_size=latent_size,
-            text_length=0,
             device=q.device,
-            text_max_len=0
         )
         if DEBUG:
             from attn_gym import visualize_attention_scores
