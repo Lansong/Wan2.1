@@ -156,7 +156,7 @@ class WanSelfAttention(nn.Module):
             return q, k, v
 
         q, k, v = qkv_fn(x)
-        q, v = rope_apply(q, grid_sizes, freqs), rope_apply(k, grid_sizes, freqs)
+        q, k = rope_apply(q, grid_sizes, freqs), rope_apply(k, grid_sizes, freqs)
 
         if self.algo == 'flash_attn':
             x = flash_attention(

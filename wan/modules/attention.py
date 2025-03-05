@@ -228,6 +228,7 @@ def _untile(x: torch.Tensor, img_size: Tuple[int, int, int], tile_size: Tuple[in
     )
     return x
 
+
 DEFAULT_TILE_SIZE = (3, 5, 4)
 DEBUG = False
 TK_IMPL_AVAILABLE = True
@@ -239,6 +240,7 @@ except ImportError as e:
     from .sta_flex_attn import get_sliding_tile_attention_mask
     from torch.nn.attention.flex_attention import flex_attention
     flex_attention = torch.compile(flex_attention, dynamic=False)
+
 
 def sliding_tile_attention(
     q: torch.Tensor,
@@ -257,7 +259,7 @@ def sliding_tile_attention(
         img_size:       [frame, height, width]
     """
     ori_dtype = q.dtype
-    # TODO @botbw: better way of doing this
+
     q = q.to(torch.bfloat16)
     k = k.to(torch.bfloat16)
     v = v.to(torch.bfloat16)
@@ -278,6 +280,7 @@ def sliding_tile_attention(
             text_length=0,
             has_text=False
         )
+        o = _untile(x=o, img_size=latent_size, tile_size=tile_size).transpose(1, 2).to(ori_dtype)
     else:
         block_mod = get_sliding_tile_attention_mask(
             kernel_size=window_size,
@@ -300,5 +303,6 @@ def sliding_tile_attention(
             value=v,
             block_mask=block_mod
         )
+        o = _untile(x=o, img_size=latent_size, tile_size=tile_size).to(ori_dtype)
 
-    return _untile(x=o, img_size=latent_size, tile_size=tile_size).to(ori_dtype)
+    return o
