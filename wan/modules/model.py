@@ -423,7 +423,7 @@ class WanModel(ModelMixin, ConfigMixin):
                  cross_attn_norm=True,
                  eps=1e-6,
                  algo: str="sliding_tile_attn",
-                 window_size_3d: Optional[Tuple[int, int ,int]]=[3, 3, 3],
+                 window_size_3d: Optional[Tuple[int, int ,int]]= (3, 3, 3),
                  ):
         r"""
         Initialize the diffusion model backbone.
