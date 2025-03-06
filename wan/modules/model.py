@@ -8,7 +8,7 @@ import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
-from .attention import flash_attention, sliding_tile_attention
+from .attention import flash_attention, sliding_tile_attention, natten
 
 __all__ = ['WanModel']
 
@@ -117,9 +117,9 @@ class WanSelfAttention(nn.Module):
             window_size_3d: sliding window size for non-flash-attn
         """
         assert dim % num_heads == 0
-        assert algo in ['flash_attn', 'sliding_tile_attn']
-        if algo in ['sliding_tile_attn']:
-            assert window_size_3d is not None
+        assert algo in ['flash_attn', 'sliding_tile_attn', 'natten']
+        if algo in ['sliding_tile_attn', 'natten'] and window_size_3d is None:
+            raise ValueError("Window size must be provided when using sparse attention")
 
         super().__init__()
         self.dim = dim
@@ -172,6 +172,19 @@ class WanSelfAttention(nn.Module):
                 for i in len(max_grid_size):
                     max_grid_size[i] = max(max_grid_size[i], grid_size[i])
             x = sliding_tile_attention(
+                q=q,
+                k=k,
+                v=v,
+                window_size=self.window_size_3d,
+                latent_size=tuple(max_grid_size)
+            )
+        elif self.algo == 'natten':
+            max_grid_size = list(grid_sizes[0].tolist())
+            for grid_size in grid_sizes[1:]:
+                grid_size = tuple(grid_size.tolist())
+                for i in len(max_grid_size):
+                    max_grid_size[i] = max(max_grid_size[i], grid_size[i])
+            x = natten(
                 q=q,
                 k=k,
                 v=v,

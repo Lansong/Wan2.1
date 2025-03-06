@@ -264,7 +264,6 @@ def sliding_tile_attention(
     k = k.to(torch.bfloat16)
     v = v.to(torch.bfloat16)
 
-    _, _, head_num, _ = q.shape
     # tile inputs
     q = _tile(x=q, latent_size=latent_size, tile_size=tile_size)
     k = _tile(x=k, latent_size=latent_size, tile_size=tile_size)
@@ -272,6 +271,7 @@ def sliding_tile_attention(
 
     if TK_IMPL_AVAILABLE:
         assert tile_size == DEFAULT_TILE_SIZE, "TK impl only supports default tile size"
+        _, _, head_num, _ = q.shape
         o = sliding_tile_attention(
             q_all=q,
             k_all=k,
@@ -306,3 +306,42 @@ def sliding_tile_attention(
         o = _untile(x=o, img_size=latent_size, tile_size=tile_size).to(ori_dtype)
 
     return o
+
+
+from .natten_flex_attn import get_natten_mask
+
+def natten(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    window_size: Tuple[int, int, int],
+    latent_size: Tuple[int, int, int],
+):
+    ori_dtype = q.dtype
+
+    q = q.to(torch.bfloat16).transpose(1, 2)
+    k = k.to(torch.bfloat16).transpose(1, 2)
+    v = v.to(torch.bfloat16).transpose(1, 2)
+
+    block_mod = get_natten_mask(
+        kernel_size=window_size,
+        img_size=latent_size,
+        device=q.device
+    )
+
+    if DEBUG:
+        from attn_gym import visualize_attention_scores
+        # install from https://github.com/pytorch-labs/attention-gym/tree/main
+        visualize_attention_scores(
+            query=q,
+            key=k,
+            mask_mod=block_mod.mask_mod,
+            name='flex-attn-visual'
+        )
+    o = flex_attention(
+        query=q,
+        key=k,
+        value=v,
+        block_mask=block_mod
+    )
+    return o.transpose(1, 2).to(ori_dtype)
