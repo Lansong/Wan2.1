@@ -15,7 +15,7 @@ import torch.distributed as dist
 from tqdm import tqdm
 
 from .distributed.fsdp import shard_model
-from .modules.model import WanModel
+from .modules.model import WanModel, update_step, get_recall
 from .modules.t5 import T5EncoderModel
 from .modules.vae import WanVAE
 from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
@@ -248,6 +248,14 @@ class WanT2V:
                     return_dict=False,
                     generator=seed_g)[0]
                 latents = [temp_x0.squeeze(0)]
+                update_step()
+
+                recall_matrix = get_recall()
+                import matplotlib.pyplot as plt
+                import seaborn as sns
+                plt.figure(figsize=(10, 10))
+                sns.heatmap(recall_matrix.to(torch.float32).cpu(), cmap="Blues", square=True, cbar=True)
+                plt.savefig('recall.jpg')
 
             x0 = latents
             if offload_model:
