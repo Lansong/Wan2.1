@@ -1,12 +1,18 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
+import os
 from typing import Tuple, Optional
 
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+from skimage.transform import resize
 
 from .attention import flash_attention, sliding_tile_attention, natten
 
@@ -99,10 +105,23 @@ class WanLayerNorm(nn.LayerNorm):
         """
         return super().forward(x.float()).type_as(x)
 
+FORWARD_STEP = 49
+VISUAL_DIFFUSION_STEP = 0
+def update_step():
+    global FORWARD_STEP
+    FORWARD_STEP += 1
+
+RECALL_MATRIX = torch.zeros((30, 12), device='cuda')
+
+WINDOW_IDXES = None
+def get_recall():
+    global RECALL_MATRIX
+    return RECALL_MATRIX
 
 class WanSelfAttention(nn.Module):
 
     def __init__(self,
+                 layer_idx: int,
                  dim,
                  num_heads,
                  algo: str,
@@ -122,6 +141,7 @@ class WanSelfAttention(nn.Module):
             raise ValueError("Window size must be provided when using sparse attention")
 
         super().__init__()
+        self.layer_idx = layer_idx
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -138,6 +158,52 @@ class WanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+        global WINDOW_IDXES
+        if WINDOW_IDXES is None and self.window_size_3d:  # to skip cross attn
+            print("loading window from cache")
+            os.makedirs("/data/Wan/cache", exist_ok=True)
+            cache_path = f"/data/Wan/cache/idxes_{self.window_size_3d}.torchtensor"
+            if not os.path.exists(cache_path):
+                idxes = []
+                w0, w1, w2 = self.window_size_3d
+                for x0 in range(21):
+                    for y0 in range(30):
+                        for z0 in range(52):
+                            local_window_idxes = []
+                            q_idx = x0 * 30 * 52 + y0 * 52 + z0
+                            for dx0 in range(-w0, w0):
+                                for dy0 in range(-w1, w1):
+                                    for dz0 in range(-w2, w2):
+                                        kv_idx = (x0 + dx0) * (30 * 52) + (y0 + dy0) * 52 + (z0 + dz0)
+                                        local_window_idxes.append((q_idx, kv_idx))
+                            idxes.append(local_window_idxes)
+                torch.save(torch.tensor(idxes), cache_path)
+            WINDOW_IDXES = torch.load(cache_path).to(self.q.weight.device)
+
+        # W0, W1, W2 = self.window_size_3d
+        # X, Y, Z = 21, 30, 52
+
+        # x0 = torch.arange(X).view(-1, 1, 1)
+        # y0 = torch.arange(Y).view(1, -1, 1)
+        # z0 = torch.arange(Z).view(1, 1, -1)
+
+        # q_idx = x0 * (Y * Z) + y0 * Z + z0
+
+        # dx0 = torch.arange(-W0 // 2, W0 // 2).view(-1, 1, 1)
+        # dy0 = torch.arange(-W1 // 2, W1 // 2).view(1, -1, 1)
+        # dz0 = torch.arange(-W2 // 2, W2 // 2).view(1, 1, -1)
+
+        # kv_idx = (x0 + dx0) * (Y * Z) + (y0 + dy0) * Z + (z0 + dz0)
+
+        # q_idx = q_idx.flatten()[:, None]
+        # kv_idx = kv_idx.flatten(0, 2).reshape(q_idx.shape[0], -1)
+
+        # idxes = torch.stack((q_idx.expand_as(kv_idx), kv_idx), dim=-1)  # Shape: [X*Y*Z, (2W0*2W1*2W2), 2]
+
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Adjust this accordingly
+        # idxes = idxes.to(device)
+
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
@@ -157,6 +223,37 @@ class WanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
         q, k = rope_apply(q, grid_sizes, freqs), rope_apply(k, grid_sizes, freqs)
+        global VISUAL
+        global FORWARD_STEP
+        if FORWARD_STEP == VISUAL_DIFFUSION_STEP:
+            os.makedirs(f"./visualization/{self.layer_idx}", exist_ok=True)
+            sqrt_s =  torch.sqrt(torch.tensor(s, device=q.device))
+
+            def save_fig(matrix, file_name):
+                plt.figure(figsize=(10, 10))
+                sns.heatmap(matrix.to(torch.float32).cpu(), cmap="Blues", square=True, cbar=True)
+                plt.savefig(file_name)
+            for i in range(self.num_heads):
+                q_head = q[:, :, i, :]
+                k_head = k[:, :, i, :]
+                attn = (torch.matmul(q_head.view(b, s, -1), k_head.view(b, s, -1).transpose(1, 2)) / sqrt_s).squeeze()
+                attn = torch.softmax(attn, dim=-1).squeeze()
+                global WINDOW_IDXES
+                window_attn = attn[WINDOW_IDXES]
+                recall = window_attn.sum(-1).mean()
+                print(f"{recall=}")
+                RECALL_MATRIX[self.layer_idx, i] = recall
+                # attn_len = 21 * 30 * 52
+                # downsampled_size = 30 * 52
+                # ori_shape = attn.shape
+                # attn = attn.reshape(21, 30, 52, 21, 30, 52).permute(1, 2, 0, 4, 5, 3).reshape(ori_shape)
+                # # attn = torch.nn.functional.interpolate(attn.unsqueeze(0).unsqueeze(0),  size=(downsampled_size, downsampled_size), mode='bilinear', align_corners=False).squeeze()
+                # pool_size = 21 * 30 * 52 // downsampled_size
+                # attn = F.avg_pool2d(attn.unsqueeze(0).unsqueeze(0), kernel_size=pool_size).squeeze()
+                # save_fig(attn, f"./visualization/{self.layer_idx}/head_{i}_logits.jpg")
+                # attn = torch.softmax(attn, dim=-1).squeeze()
+                # save_fig(attn, f"./visualization/{self.layer_idx}/head_{i}_score.jpg")
+
 
         if self.algo == 'flash_attn':
             x = flash_attention(
@@ -279,6 +376,7 @@ WAN_CROSSATTENTION_CLASSES = {
 class WanAttentionBlock(nn.Module):
 
     def __init__(self,
+                 layer_idx: int,
                  cross_attn_type,
                  dim,
                  ffn_dim,
@@ -291,6 +389,7 @@ class WanAttentionBlock(nn.Module):
                  eps=1e-6
                  ):
         super().__init__()
+        self.layer_idx = layer_idx
         self.dim = dim
         self.ffn_dim = ffn_dim
         self.num_heads = num_heads
@@ -301,12 +400,13 @@ class WanAttentionBlock(nn.Module):
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, algo, window_size_3d, window_size, qk_norm,
+        self.self_attn = WanSelfAttention(self.layer_idx, dim, num_heads, algo, window_size_3d, window_size, qk_norm,
                                           eps)
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
-        self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](dim,
+        self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](self.layer_idx,
+                                                                      dim,
                                                                       num_heads,
                                                                       'flash_attn',
                                                                       None,
@@ -435,8 +535,8 @@ class WanModel(ModelMixin, ConfigMixin):
                  qk_norm=True,
                  cross_attn_norm=True,
                  eps=1e-6,
-                 algo: str="sliding_tile_attn",
-                 window_size_3d: Optional[Tuple[int, int ,int]]= (3, 3, 3),
+                 algo: str="flash_attn",
+                 window_size_3d: Optional[Tuple[int, int ,int]]= (19, int(30 * 0.7), int(52 * 0.7)),
                  ):
         r"""
         Initialize the diffusion model backbone.
@@ -493,6 +593,7 @@ class WanModel(ModelMixin, ConfigMixin):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        self.window_size_3d = window_size_3d
 
         # embeddings
         self.patch_embedding = nn.Conv3d(
@@ -508,9 +609,9 @@ class WanModel(ModelMixin, ConfigMixin):
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
-            WanAttentionBlock(cross_attn_type, dim, ffn_dim,num_heads, algo, window_size_3d,
+            WanAttentionBlock(i, cross_attn_type, dim, ffn_dim,num_heads, algo, window_size_3d,
                               window_size, qk_norm, cross_attn_norm, eps)
-            for _ in range(num_layers)
+            for i in range(num_layers)
         ])
 
         # head
